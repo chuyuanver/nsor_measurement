@@ -1,8 +1,12 @@
 from tkinter import *
 from tkinter import filedialog
-from ao_config import ao_config
-from ai_config import ai_config
 from nidaqmx.task import Task
+from nidaqmx import constants
+import numpy as np
+from numpy import pi
+from nmr_pulses import pulse_interpreter
+import matplotlib.pyplot as plt
+
 '''
 A gui for NSOR measurement and data processing
 '''
@@ -25,7 +29,10 @@ def open_pulse_sequence():
     pulse_entry.insert(0,pulse_name)
 
 def start_acquistion():
-    samp_rate = int(samp_rate_entry.get())
+    '''
+    set necessary constants
+    '''
+    samp_rate = int(float(samp_rate_entry.get())*1000000)
     iteration = int(iteration_entry.get())
     average = int(avg_entry.get())
     pulse_chan = pulse_channel_entry.get()
@@ -34,27 +41,41 @@ def start_acquistion():
     laser_intensity_chan = laser_intensity_channel_entry.get()
     pulse_file_path = pulse_entry.get()
     file_path = file_path_entry.get()
+
+    pulse_data = pulse_interpreter(pulse_file_path, samp_rate, iteration)
+    samp_num = len(pulse_data)
+    '''
+    configure the ao/ai tasks
+    '''
     for current_iter in range(iteration):
         # note: displayed iteration starts with index of 1 while the iteration used in program starts with index of 0
         '''
         need to think of a way of arrange stored files
-        two strategies: for single shot experiment, use instream of the nidaqmx
-                    for averaged experiments, maybe use pandas?
         '''
-
         current_iter_label.config(text = f'Current Iteration: {current_iter+1}')
-        (ao_task,spc) = ao_config(pulse_chan, samp_rate, pulse_file_path, iteration)
-        ai_task = ai_config((nmr_chan, nsor_chan, laser_intensity_chan), samp_rate, spc, file_path, iteration)
-        for current_avg in range(average):
-            current_avg_label.config(text = f'Current Average: {current_avg+1}')
-            ao_task.start()
-            ai_task.start()
-            ao_task.wait_until_done()
-            ai_task.wait_until_done()
-            ao_task.stop()
-            ai_task.stop()
-        ao_task.close()
-        ai_task.close()
+        with Task('signal_task') as sig_task, Task('pulse_task') as pulse_task:
+            for sig_chan in [nmr_chan, nsor_chan, laser_intensity_chan]:
+                sig_task.ai_channels.add_ai_voltage_chan(physical_channel = sig_chan,
+                        terminal_config = constants.TerminalConfiguration.DIFFERENTIAL)
+            pulse_task.ao_channels.add_ao_voltage_chan(pulse_chan)
+            pulse_task.timing.cfg_samp_clk_timing(rate =samp_rate,
+                            samps_per_chan = samp_num,
+                            sample_mode=constants.AcquisitionType.FINITE)
+            sig_task.timing.cfg_samp_clk_timing(rate = samp_rate,
+                         source = '/Dev1/ao/SampleClock',
+                         samps_per_chan = samp_num,
+                         sample_mode=constants.AcquisitionType.FINITE)
+            pulse_task.write(pulse_data)
+            for current_avg in range(average):
+                sig_task.start()
+                pulse_task.start()
+                sig_task.wait_until_done()
+                pulse_task.wait_until_done()
+                sig_data = np.array(sig_task.read(number_of_samples_per_channel  = samp_num))
+                sig_task.stop()
+                pulse_task.stop()
+                plt.plot(sig_data[1,:])
+                plt.show()
 
 
 window = Tk()  #create a window
@@ -93,14 +114,14 @@ pulse file selection
 pulse_label = Label(pulse_frame,text = 'Pulse:', font = ('Helvetica', 16))
 pulse_entry = Entry(pulse_frame, font = ('Helvetica', 16))
 pulse_button = Button(pulse_frame, text = 'Choose Pulse', font = ('Helvetica', 16), command = open_pulse_sequence)
-
+pulse_entry.insert(0,r'C:\Users\Hilty\Desktop\python\nsor_measurement\pulse_sequences\sin_wave.txt')
 
 '''
 parameter set up for ao and ai
 '''
 samp_rate_label = Label(parameter_frame,text = 'Sampling rate (MS/s):', font = ('Helvetica', 16))
 samp_rate_entry = Entry(parameter_frame, font = ('Helvetica', 16), width = 3)
-samp_rate_entry.insert(0,'1')
+samp_rate_entry.insert(0,'0.33')
 
 iteration_label = Label(parameter_frame,text = 'Iteration:', font = ('Helvetica', 16))
 iteration_entry = Entry(parameter_frame, font = ('Helvetica', 16), width = 3)
